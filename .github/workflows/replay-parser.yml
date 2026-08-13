@@ -142,8 +142,8 @@ jobs:
 
           runner_lifecycle start
 
-          claim_next
-          claim_status=$?
+          claim_status=0
+          claim_next || claim_status=$?
           if [ "$claim_status" -eq 2 ]; then
             echo "Replay queue was empty when the runner claimed work."
             exit 0
@@ -230,15 +230,15 @@ jobs:
               break
             fi
 
-            claim_next
-            claim_status=$?
+            claim_status=0
+            claim_next || claim_status=$?
             if [ "$claim_status" -eq 2 ]; then
               empty_claims=$((empty_claims + 1))
               if [ "$empty_claims" -lt 2 ]; then
                 echo "Replay queue is empty; keeping slot alive for a 10-second arrival grace period."
                 sleep 10
-                claim_next
-                claim_status=$?
+                claim_status=0
+                claim_next || claim_status=$?
               fi
             fi
             if [ "$claim_status" -eq 2 ]; then
