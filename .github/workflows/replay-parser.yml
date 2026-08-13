@@ -52,12 +52,16 @@ jobs:
           echo "has_work=$available" >> "$GITHUB_OUTPUT"
           echo "Replay queue preflight: ${response:-unavailable; failing open}"
 
-      - name: Pull prebuilt replay parser
-        if: steps.queue.outputs.has_work == 'true'
+      - name: Verify parser image access
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker manifest inspect "$REPLAY_IMAGE" >/dev/null
+
+      - name: Pull prebuilt replay parser
+        if: steps.queue.outputs.has_work == 'true'
+        run: |
           docker pull "$REPLAY_IMAGE"
           docker image inspect "$REPLAY_IMAGE" --format 'Replay image {{index .RepoDigests 0}}'
 
