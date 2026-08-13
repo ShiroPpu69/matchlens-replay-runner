@@ -59,15 +59,9 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
           docker manifest inspect "$REPLAY_IMAGE" >/dev/null
 
-      - name: Pull prebuilt replay parser
-        if: steps.queue.outputs.has_work == 'true'
-        run: |
-          docker pull "$REPLAY_IMAGE"
-          docker image inspect "$REPLAY_IMAGE" --format 'Replay image {{index .RepoDigests 0}}'
-
-      # Each slot builds the expensive parser image once, then safely drains
-      # several FIFO jobs. The time budget always leaves enough room for one
-      # full ten-minute parse and cleanup before the hard workflow timeout.
+      # Claim before pulling and booting the image so queue wait measures real
+      # GitHub scheduling, while parser bootstrap is reported as running work.
+      # Each slot then reuses the image and service for a bounded FIFO batch.
       - name: Drain replay queue
         if: steps.queue.outputs.has_work == 'true'
         env:
@@ -88,6 +82,37 @@ jobs:
             curl --silent --show-error --connect-timeout 5 --max-time 15 --request POST \
               --header "Authorization: Bearer ${RUNNER_TOKEN}" --header 'Content-Type: application/json' \
               --data "$payload" "${MATCH_LENS_ORIGIN}/api/replay-jobs/runner" >/dev/null || true
+          }
+
+          claim_next() {
+            response=""
+            for claim_attempt in $(seq 1 3); do
+              echo "Claim attempt ${claim_attempt}/3 for slot ${{ matrix.slot }}"
+              if response=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 --request POST \
+                --header "Authorization: Bearer ${RUNNER_TOKEN}" \
+                "${MATCH_LENS_ORIGIN}/api/replay-jobs/next"); then break; fi
+              response=""
+              sleep 10
+            done
+            if [ -z "$response" ]; then
+              echo "Claim endpoint remained unavailable after retries." >&2
+              return 1
+            fi
+            active_match_id=$(echo "$response" | jq -r '.job.matchId // empty')
+            active_job_id=$(echo "$response" | jq -r '.job.jobId // empty')
+            replay_url=$(echo "$response" | jq -r '.job.replayUrl // empty')
+            if [ -z "$active_match_id" ] || [ -z "$active_job_id" ] || [ -z "$replay_url" ]; then
+              active_match_id=""
+              active_job_id=""
+              return 2
+            fi
+            starting=$(jq -n --arg jobId "$active_job_id" --arg stage "runner_starting" --arg parserInstance "$runner_id" \
+              '{jobId:$jobId,heartbeat:true,stage:$stage,parserInstance:$parserInstance}')
+            curl --silent --show-error --request POST \
+              --header "Authorization: Bearer ${CALLBACK_TOKEN}" --header 'Content-Type: application/json' \
+              --data "$starting" "${MATCH_LENS_ORIGIN}/api/replay-enhancements/${active_match_id}" >/dev/null || true
+            echo "Claimed replay ${active_match_id}; starting parser runtime."
+            return 0
           }
 
           release_active_lease() {
@@ -117,6 +142,18 @@ jobs:
 
           runner_lifecycle start
 
+          claim_next
+          claim_status=$?
+          if [ "$claim_status" -eq 2 ]; then
+            echo "Replay queue was empty when the runner claimed work."
+            exit 0
+          fi
+          if [ "$claim_status" -ne 0 ]; then exit 1; fi
+
+          bootstrap_started=$SECONDS
+          docker pull "$REPLAY_IMAGE"
+          docker image inspect "$REPLAY_IMAGE" --format 'Replay image {{index .RepoDigests 0}} ({{.Size}} bytes)'
+
           docker run --detach --name replay-parser --publish 8080:8080 \
             --env SERVICE_TOKEN=local-runner \
             --env CALLBACK_TOKEN="$CALLBACK_TOKEN" \
@@ -131,40 +168,15 @@ jobs:
             echo "Replay parser did not become healthy." >&2
             exit 1
           fi
+          bootstrap_ms=$(( (SECONDS - bootstrap_started) * 1000 ))
+          ready=$(jq -n --arg jobId "$active_job_id" --arg stage "parser_ready" --argjson bootstrapMs "$bootstrap_ms" \
+            '{jobId:$jobId,heartbeat:true,stage:$stage,timings:{bootstrapMs:$bootstrapMs}}')
+          curl --silent --show-error --request POST \
+            --header "Authorization: Bearer ${CALLBACK_TOKEN}" --header 'Content-Type: application/json' \
+            --data "$ready" "${MATCH_LENS_ORIGIN}/api/replay-enhancements/${active_match_id}" >/dev/null || true
 
           while [ "$processed" -lt "$MAX_JOBS_PER_SLOT" ] && [ "$SECONDS" -lt $((drain_deadline - 660)) ]; do
             runner_lifecycle heartbeat
-            response=""
-            for claim_attempt in $(seq 1 3); do
-              echo "Claim attempt ${claim_attempt}/3 for slot ${{ matrix.slot }}"
-              if response=$(curl --fail --silent --show-error --connect-timeout 10 --max-time 30 --request POST \
-                --header "Authorization: Bearer ${RUNNER_TOKEN}" \
-                "${MATCH_LENS_ORIGIN}/api/replay-jobs/next"); then break; fi
-              response=""
-              sleep 10
-            done
-            if [ -z "$response" ]; then
-              echo "Claim endpoint remained unavailable after retries." >&2
-              exit 1
-            fi
-
-            active_match_id=$(echo "$response" | jq -r '.job.matchId // empty')
-            active_job_id=$(echo "$response" | jq -r '.job.jobId // empty')
-            replay_url=$(echo "$response" | jq -r '.job.replayUrl // empty')
-            if [ -z "$active_match_id" ] || [ -z "$active_job_id" ] || [ -z "$replay_url" ]; then
-              active_match_id=""
-              active_job_id=""
-              empty_claims=$((empty_claims + 1))
-              if [ "$empty_claims" -lt 2 ]; then
-                echo "Replay queue is empty; keeping slot alive for a 10-second arrival grace period."
-                sleep 10
-                continue
-              fi
-              echo "Replay queue remained empty after ${processed} job(s) in this slot."
-              break
-            fi
-            empty_claims=0
-
             echo "Processing replay ${active_match_id} (${processed}/${MAX_JOBS_PER_SLOT} already completed in this slot)."
             submit=$(jq -n --arg jobId "$active_job_id" --arg matchId "$active_match_id" --arg replayUrl "$replay_url" '{jobId:$jobId,matchId:$matchId,replayUrl:$replayUrl}')
             if ! job=$(curl --fail --silent --show-error --request POST \
@@ -213,6 +225,28 @@ jobs:
               release_active_lease
             fi
             processed=$((processed + 1))
+
+            if [ "$processed" -ge "$MAX_JOBS_PER_SLOT" ] || [ "$SECONDS" -ge $((drain_deadline - 660)) ]; then
+              break
+            fi
+
+            claim_next
+            claim_status=$?
+            if [ "$claim_status" -eq 2 ]; then
+              empty_claims=$((empty_claims + 1))
+              if [ "$empty_claims" -lt 2 ]; then
+                echo "Replay queue is empty; keeping slot alive for a 10-second arrival grace period."
+                sleep 10
+                claim_next
+                claim_status=$?
+              fi
+            fi
+            if [ "$claim_status" -eq 2 ]; then
+              echo "Replay queue remained empty after ${processed} job(s) in this slot."
+              break
+            fi
+            if [ "$claim_status" -ne 0 ]; then exit 1; fi
+            empty_claims=0
           done
 
           echo "Slot ${{ matrix.slot }} drained ${processed} replay job(s)."
