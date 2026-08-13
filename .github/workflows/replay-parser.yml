@@ -49,8 +49,37 @@ jobs:
             --header "Authorization: Bearer ${RUNNER_TOKEN}" \
             "${MATCH_LENS_ORIGIN}/api/replay-jobs/runner" || true)
           available=$(echo "$response" | jq -r 'if .workAvailable == false then "false" else "true" end' 2>/dev/null || echo true)
+          waiting_source=$(echo "$response" | jq -r '.waitingSourceMatchId // empty' 2>/dev/null || true)
           echo "has_work=$available" >> "$GITHUB_OUTPUT"
+          echo "waiting_source=$waiting_source" >> "$GITHUB_OUTPUT"
           echo "Replay queue preflight: ${response:-unavailable; failing open}"
+
+      - name: Resolve waiting replay source outside Cloudflare
+        if: steps.queue.outputs.waiting_source != ''
+        env:
+          RUNNER_TOKEN: ${{ secrets.REPLAY_RUNNER_TOKEN }}
+          MATCH_ID: ${{ steps.queue.outputs.waiting_source }}
+        run: |
+          resolved=false
+          for attempt in 1 2 3; do
+            if curl --fail --silent --show-error --connect-timeout 5 --max-time 30 \
+              "https://api.opendota.com/api/matches/${MATCH_ID}" --output /tmp/opendota-match.json \
+              && jq -e --arg matchId "$MATCH_ID" '(.match_id | tostring) == $matchId' /tmp/opendota-match.json >/dev/null; then
+              jq -n --arg action resolve_source --arg matchId "$MATCH_ID" --rawfile rawText /tmp/opendota-match.json \
+                '{action:$action,matchId:$matchId,rawText:$rawText}' >/tmp/source-resolution.json
+              response=$(curl --fail --silent --show-error --connect-timeout 5 --max-time 45 --request POST \
+                --header "Authorization: Bearer ${RUNNER_TOKEN}" --header 'Content-Type: application/json' \
+                --data-binary @/tmp/source-resolution.json "${MATCH_LENS_ORIGIN}/api/replay-jobs/runner")
+              echo "Replay source resolution: $response"
+              resolved=true
+              break
+            fi
+            echo "Replay source lookup attempt ${attempt}/3 failed; retrying with backoff."
+            sleep $((attempt * 5))
+          done
+          if [ "$resolved" != true ]; then
+            echo "Replay source remains unavailable from the independent runner network; a later run will retry."
+          fi
 
       - name: Verify parser image access
         env:
