@@ -79,6 +79,9 @@ export function extractReplayData(entries) {
   const objectives = [];
   const buybacks = [];
   const runeEvents = [];
+  const abilityCasts = [];
+  const itemUses = [];
+  const seenActions = new Set();
 
   for (const entry of entries) {
     if (entry.type === "interval" && Number.isInteger(entry.slot)) {
@@ -106,6 +109,20 @@ export function extractReplayData(entries) {
       wards.push({ gameTime: finite(entry.time), playerSlot: Number.isInteger(entry.slot) ? indexes.slotToPlayerSlot.get(entry.slot) ?? null : null, kind: entry.type, x: finite(entry.x), y: finite(entry.y), entityHandle: finite(entry.ehandle) });
     } else if (entry.type === "DOTA_COMBATLOG_BUYBACK") {
       buybacks.push({ gameTime: finite(entry.time), playerSlot: finite(entry.value), source: "replay_combat_log" });
+    } else if (entry.type === "DOTA_COMBATLOG_ABILITY" || entry.type === "DOTA_COMBATLOG_ITEM") {
+      const sourceHeroKey = [entry.attackername, entry.sourcename]
+        .find((value) => typeof value === "string" && value.startsWith("npc_dota_hero_")) ?? null;
+      const playerSlot = sourceHeroKey ? indexes.playerSlotForHero(sourceHeroKey) : null;
+      const actionKey = String(entry.inflictor ?? entry.inflictorname ?? entry.valuename ?? "unknown");
+      if (playerSlot === null || actionKey === "unknown") continue;
+      const gameTime = finite(entry.time);
+      const targetHeroKey = typeof entry.targetname === "string" && entry.targetname.startsWith("npc_dota_hero_") ? entry.targetname : null;
+      const dedupeKey = `${entry.type}|${Math.round((gameTime ?? -1) * 2)}|${playerSlot}|${actionKey}|${targetHeroKey ?? ""}`;
+      if (seenActions.has(dedupeKey)) continue;
+      seenActions.add(dedupeKey);
+      const action = { gameTime, playerSlot, heroKey: sourceHeroKey, targetHeroKey, actionKey: actionKey.replace(/^item_/, ""), source: "replay_combat_log" };
+      if (entry.type === "DOTA_COMBATLOG_ITEM" || actionKey.startsWith("item_")) itemUses.push(action);
+      else abilityCasts.push(action);
     } else if (String(entry.type).startsWith("CHAT_MESSAGE_") || entry.type === "DOTA_COMBATLOG_TEAM_BUILDING_KILL") {
       if (["CHAT_MESSAGE_TOWER_KILL", "CHAT_MESSAGE_BARRACKS_KILL", "CHAT_MESSAGE_ROSHAN_KILL", "CHAT_MESSAGE_AEGIS", "CHAT_MESSAGE_GLYPH_USED", "CHAT_MESSAGE_SCAN_USED", "CHAT_MESSAGE_COURIER_LOST", "DOTA_COMBATLOG_TEAM_BUILDING_KILL"].includes(entry.type)) {
         objectives.push({ gameTime: finite(entry.time), type: entry.type, player1: finite(entry.player1), player2: finite(entry.player2), value: finite(entry.value), target: typeof entry.targetname === "string" ? entry.targetname : null });
@@ -126,10 +143,14 @@ export function extractReplayData(entries) {
     runeEvents,
     damageBySourceTarget: aggregateCombat(entries, "DOTA_COMBATLOG_DAMAGE", indexes),
     healingBySourceTarget: aggregateCombat(entries, "DOTA_COMBATLOG_HEAL", indexes),
+    abilityCasts,
+    itemUses,
     coverage: {
       positionIntervalSeconds: 5,
       economyIntervalSeconds: 60,
       lowLevelActionsOmitted: true,
+      actionEventsCaptured: true,
+      actionEventFilterVersion: 2,
       source: "Valve replay parsed by odota/parser",
     },
   };
