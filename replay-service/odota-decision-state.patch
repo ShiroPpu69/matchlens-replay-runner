@@ -1,0 +1,27 @@
+diff --git a/src/main/java/opendota/Entry.java b/src/main/java/opendota/Entry.java
+--- a/src/main/java/opendota/Entry.java
++++ b/src/main/java/opendota/Entry.java
+@@ -47,6 +47,10 @@ public class Entry implements Cloneable {
+     public Integer charges;
+     public Integer secondary_charges;
+     public Integer life_state;
++    public Integer health;
++    public Integer max_health;
++    public Float mana;
++    public Float max_mana;
+     public Integer level;
+     public Integer kills;
+     public Integer deaths;
+diff --git a/src/main/java/opendota/Parse.java b/src/main/java/opendota/Parse.java
+--- a/src/main/java/opendota/Parse.java
++++ b/src/main/java/opendota/Parse.java
+@@ -725,5 +725,9 @@ public class Parse {
+                         entry.variant = variant;
+                         entry.facet_hero_id = facet_hero_id;
+                         entry.life_state = getEntityProperty(e, "m_lifeState", null);
++                        entry.health = getEntityProperty(e, "m_iHealth", null);
++                        entry.max_health = getEntityProperty(e, "m_iMaxHealth", null);
++                        entry.mana = getEntityProperty(e, "m_flMana", null);
++                        entry.max_mana = getEntityProperty(e, "m_flMaxMana", null);
+                         // check if hero has been assigned to entity
+                         if (hero > 0) {

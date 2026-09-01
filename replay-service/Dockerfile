@@ -1,5 +1,7 @@
 FROM maven:3.9.11-eclipse-temurin-21 AS parser-build
 RUN git clone https://github.com/odota/parser.git /src/parser && cd /src/parser && git checkout a03b9e5f228cecb3f2e3ddfd378683bbb1d467fa
+COPY replay-service/odota-decision-state.patch /src/odota-decision-state.patch
+RUN cd /src/parser && git apply /src/odota-decision-state.patch
 RUN cd /src/parser && mvn -q -DskipTests package
 COPY replay-service/ReplayBzip2.java /src/ReplayBzip2.java
 RUN mkdir -p /src/replay-tools && \

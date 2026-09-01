@@ -92,7 +92,8 @@ export function extractReplayData(entries) {
       const positionBucket = Math.floor(gameTime / 5);
       if (gameTime >= 0 && x !== null && y !== null && lastPositionBucket.get(entry.slot) !== positionBucket) {
         lastPositionBucket.set(entry.slot, positionBucket);
-        positions.push({ gameTime, playerSlot, x, y, lifeState: finite(entry.life_state), level: finite(entry.level) });
+        positions.push({ gameTime, playerSlot, x, y, lifeState: finite(entry.life_state), level: finite(entry.level),
+          health: finite(entry.health), maxHealth: finite(entry.max_health), mana: finite(entry.mana), maxMana: finite(entry.max_mana) });
       }
       const minuteBucket = Math.floor(Math.max(0, gameTime) / 60);
       if (gameTime >= 0 && lastMinuteBucket.get(entry.slot) !== minuteBucket) {
@@ -150,7 +151,8 @@ export function extractReplayData(entries) {
       economyIntervalSeconds: 60,
       lowLevelActionsOmitted: true,
       actionEventsCaptured: true,
-      actionEventFilterVersion: 2,
+      actionEventFilterVersion: 3,
+      decisionStateFields: ["health", "maxHealth", "mana", "maxMana", "lifeState", "position"],
       source: "Valve replay parsed by odota/parser",
     },
   };
