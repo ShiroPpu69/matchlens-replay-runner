@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import readline from "node:readline";
 import { promisify } from "node:util";
-import { extractReplayData } from "./extract.mjs";
+import { extractReplayData, shouldRetainReplayEntry } from "./extract.mjs";
 import { detectReplayCompression, replayCompression } from "./replay-format.mjs";
 import { downloadReplay } from "./download.mjs";
 
@@ -21,7 +21,7 @@ const callbackBaseUrl = (process.env.CALLBACK_BASE_URL || "").replace(/\/$/, "")
 const parserUrl = process.env.PARSER_URL || "http://127.0.0.1:5600/";
 const dataDir = process.env.DATA_DIR || "/data";
 const storePath = join(dataDir, "jobs.json");
-const resultSchemaVersion = "2.1.0";
+const resultSchemaVersion = "2.2.0";
 const jobs = new Map();
 let running = false;
 
@@ -97,7 +97,7 @@ async function parseReplay(job) {
     for await (const line of lines) {
       if (!line.trim()) continue;
       const entry = JSON.parse(line);
-      if (entry.type === "interval" || entry.type === "player_slot" || entry.type === "DOTA_COMBATLOG_DEATH" || entry.type === "DOTA_ABILITY_LEVEL" || entry.type === "DOTA_COMBATLOG_PURCHASE" || entry.type === "DOTA_COMBATLOG_DAMAGE" || entry.type === "DOTA_COMBATLOG_HEAL" || entry.type === "DOTA_COMBATLOG_BUYBACK" || entry.type === "DOTA_COMBATLOG_TEAM_BUILDING_KILL" || ["obs", "sen", "obs_left", "sen_left"].includes(entry.type) || String(entry.type).startsWith("CHAT_MESSAGE_")) entries.push(entry);
+      if (shouldRetainReplayEntry(entry)) entries.push(entry);
     }
     await setStage("normalize");
     const result = { schemaVersion: resultSchemaVersion, matchId: job.matchId, generatedAt: new Date().toISOString(), parser: "odota/parser@a03b9e5", ...extractReplayData(entries) };

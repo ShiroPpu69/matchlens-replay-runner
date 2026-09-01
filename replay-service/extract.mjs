@@ -2,6 +2,19 @@ import { enhanceKills } from "./enhance.mjs";
 
 const heroPrefix = "CDOTA_Unit_Hero_";
 
+const retainedCombatLogTypes = new Set([
+  "DOTA_COMBATLOG_DEATH", "DOTA_ABILITY_LEVEL", "DOTA_COMBATLOG_PURCHASE",
+  "DOTA_COMBATLOG_DAMAGE", "DOTA_COMBATLOG_HEAL", "DOTA_COMBATLOG_BUYBACK",
+  "DOTA_COMBATLOG_TEAM_BUILDING_KILL", "DOTA_COMBATLOG_ABILITY", "DOTA_COMBATLOG_ITEM",
+]);
+
+export function shouldRetainReplayEntry(entry) {
+  const type = String(entry?.type ?? "");
+  return type === "interval" || type === "player_slot" || retainedCombatLogTypes.has(type)
+    || ["obs", "sen", "obs_left", "sen_left"].includes(type)
+    || type.startsWith("CHAT_MESSAGE_");
+}
+
 function heroKeys(unit) {
   if (typeof unit !== "string" || !unit.startsWith(heroPrefix)) return [];
   const ending = unit.slice(heroPrefix.length);
