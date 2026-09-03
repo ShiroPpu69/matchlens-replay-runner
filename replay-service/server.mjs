@@ -119,7 +119,10 @@ async function callback(job, result) {
     method: "POST",
     headers: { Authorization: `Bearer ${callbackToken}`, "Content-Type": "application/json", ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}) },
     body: JSON.stringify({ jobId: job.id, result }),
-    signal: AbortSignal.timeout(30_000),
+    // The callback persists a compressed replay payload into sharded D1. Full
+    // decision-state results are larger than legacy payloads, so allow the
+    // server-side transaction to finish instead of aborting a healthy parse.
+    signal: AbortSignal.timeout(180_000),
   });
   if (!response.ok) throw new Error(`callback returned ${response.status}: ${(await response.text()).slice(0, 300)}`);
   console.log("[replay] callback completed", { matchId: job.matchId, jobId: job.id });
