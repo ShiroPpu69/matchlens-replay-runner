@@ -23,6 +23,20 @@ function heroKeys(unit) {
 
 function finite(value) { return Number.isFinite(Number(value)) ? Number(value) : null; }
 
+function ratio(part, total) {
+  return total > 0 ? Number((part / total).toFixed(4)) : 0;
+}
+
+function actionTarget(entry, indexes) {
+  const heroKey = typeof entry.targetname === "string" && entry.targetname.startsWith("npc_dota_hero_") ? entry.targetname : null;
+  return { targetHeroKey: heroKey, targetPlayerSlot: heroKey ? indexes.playerSlotForHero(heroKey) : null };
+}
+
+function normalizeActionKey(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  return key && key !== "unknown" ? key.replace(/^item_/, "") : null;
+}
+
 function buildIndexes(entries) {
   const heroToSlot = new Map();
   const slotToPlayerSlot = new Map();
@@ -81,7 +95,14 @@ export function extractReplayData(entries) {
   const runeEvents = [];
   const abilityCasts = [];
   const itemUses = [];
+  const lifeStateTransitions = [];
   const seenActions = new Set();
+  const lastLifeState = new Map();
+  let positionSamplesWithHealth = 0;
+  let positionSamplesWithMana = 0;
+  let positionSamplesWithLifeState = 0;
+  let actionEntriesSeen = 0;
+  let actionEntriesWithResolvedActor = 0;
 
   for (const entry of entries) {
     if (entry.type === "interval" && Number.isInteger(entry.slot)) {
@@ -89,11 +110,28 @@ export function extractReplayData(entries) {
       const gameTime = finite(entry.time);
       if (playerSlot === null || gameTime === null) continue;
       const x = finite(entry.x); const y = finite(entry.y);
+      const lifeState = finite(entry.life_state);
+      const previousLifeState = lastLifeState.get(entry.slot);
+      if (gameTime >= 0 && lifeState !== null && previousLifeState !== undefined && previousLifeState !== lifeState) {
+        lifeStateTransitions.push({
+          gameTime,
+          playerSlot,
+          fromLifeState: previousLifeState,
+          toLifeState: lifeState,
+          transition: previousLifeState === 0 && lifeState !== 0 ? "death" : previousLifeState !== 0 && lifeState === 0 ? "respawn" : "state_change",
+          source: "replay_entity_state",
+        });
+      }
+      if (lifeState !== null) lastLifeState.set(entry.slot, lifeState);
       const positionBucket = Math.floor(gameTime / 5);
       if (gameTime >= 0 && x !== null && y !== null && lastPositionBucket.get(entry.slot) !== positionBucket) {
         lastPositionBucket.set(entry.slot, positionBucket);
-        positions.push({ gameTime, playerSlot, x, y, lifeState: finite(entry.life_state), level: finite(entry.level),
-          health: finite(entry.health), maxHealth: finite(entry.max_health), mana: finite(entry.mana), maxMana: finite(entry.max_mana) });
+        const health = finite(entry.health); const maxHealth = finite(entry.max_health);
+        const mana = finite(entry.mana); const maxMana = finite(entry.max_mana);
+        if (health !== null && maxHealth !== null && maxHealth > 0) positionSamplesWithHealth += 1;
+        if (mana !== null && maxMana !== null && maxMana > 0) positionSamplesWithMana += 1;
+        if (lifeState !== null) positionSamplesWithLifeState += 1;
+        positions.push({ gameTime, playerSlot, x, y, lifeState, level: finite(entry.level), health, maxHealth, mana, maxMana });
       }
       const minuteBucket = Math.floor(Math.max(0, gameTime) / 60);
       if (gameTime >= 0 && lastMinuteBucket.get(entry.slot) !== minuteBucket) {
@@ -113,16 +151,19 @@ export function extractReplayData(entries) {
     } else if (entry.type === "DOTA_COMBATLOG_ABILITY" || entry.type === "DOTA_COMBATLOG_ITEM") {
       const sourceHeroKey = [entry.attackername, entry.sourcename]
         .find((value) => typeof value === "string" && value.startsWith("npc_dota_hero_")) ?? null;
+      if (sourceHeroKey) actionEntriesSeen += 1;
       const playerSlot = sourceHeroKey ? indexes.playerSlotForHero(sourceHeroKey) : null;
-      const actionKey = String(entry.inflictor ?? entry.inflictorname ?? entry.valuename ?? "unknown");
-      if (playerSlot === null || actionKey === "unknown") continue;
+      const rawActionKey = entry.inflictor ?? entry.inflictorname ?? entry.valuename;
+      const actionKey = normalizeActionKey(rawActionKey);
+      if (playerSlot === null || actionKey === null) continue;
+      actionEntriesWithResolvedActor += 1;
       const gameTime = finite(entry.time);
-      const targetHeroKey = typeof entry.targetname === "string" && entry.targetname.startsWith("npc_dota_hero_") ? entry.targetname : null;
-      const dedupeKey = `${entry.type}|${Math.round((gameTime ?? -1) * 2)}|${playerSlot}|${actionKey}|${targetHeroKey ?? ""}`;
+      const target = actionTarget(entry, indexes);
+      const dedupeKey = `${entry.type}|${gameTime ?? -1}|${playerSlot}|${actionKey}|${target.targetHeroKey ?? ""}|${finite(entry.value) ?? ""}`;
       if (seenActions.has(dedupeKey)) continue;
       seenActions.add(dedupeKey);
-      const action = { gameTime, playerSlot, heroKey: sourceHeroKey, targetHeroKey, actionKey: actionKey.replace(/^item_/, ""), source: "replay_combat_log" };
-      if (entry.type === "DOTA_COMBATLOG_ITEM" || actionKey.startsWith("item_")) itemUses.push(action);
+      const action = { gameTime, playerSlot, heroKey: sourceHeroKey, ...target, actionKey, value: finite(entry.value), source: "replay_combat_log" };
+      if (entry.type === "DOTA_COMBATLOG_ITEM" || String(rawActionKey ?? "").startsWith("item_")) itemUses.push(action);
       else abilityCasts.push(action);
     } else if (String(entry.type).startsWith("CHAT_MESSAGE_") || entry.type === "DOTA_COMBATLOG_TEAM_BUILDING_KILL") {
       if (["CHAT_MESSAGE_TOWER_KILL", "CHAT_MESSAGE_BARRACKS_KILL", "CHAT_MESSAGE_ROSHAN_KILL", "CHAT_MESSAGE_AEGIS", "CHAT_MESSAGE_GLYPH_USED", "CHAT_MESSAGE_SCAN_USED", "CHAT_MESSAGE_COURIER_LOST", "DOTA_COMBATLOG_TEAM_BUILDING_KILL"].includes(entry.type)) {
@@ -146,13 +187,27 @@ export function extractReplayData(entries) {
     healingBySourceTarget: aggregateCombat(entries, "DOTA_COMBATLOG_HEAL", indexes),
     abilityCasts,
     itemUses,
+    lifeStateTransitions,
     coverage: {
       positionIntervalSeconds: 5,
       economyIntervalSeconds: 60,
       lowLevelActionsOmitted: true,
       actionEventsCaptured: true,
-      actionEventFilterVersion: 3,
+      actionEventFilterVersion: 4,
       decisionStateFields: ["health", "maxHealth", "mana", "maxMana", "lifeState", "position"],
+      positionSamples: positions.length,
+      positionSamplesWithHealth,
+      positionSamplesWithMana,
+      positionSamplesWithLifeState,
+      healthStateCoverage: ratio(positionSamplesWithHealth, positions.length),
+      manaStateCoverage: ratio(positionSamplesWithMana, positions.length),
+      lifeStateCoverage: ratio(positionSamplesWithLifeState, positions.length),
+      actionEntriesSeen,
+      actionEntriesWithResolvedActor,
+      actionActorResolutionRate: ratio(actionEntriesWithResolvedActor, actionEntriesSeen),
+      observedAbilityCasts: abilityCasts.length,
+      observedItemUses: itemUses.length,
+      observedLifeStateTransitions: lifeStateTransitions.length,
       source: "Valve replay parsed by odota/parser",
     },
   };

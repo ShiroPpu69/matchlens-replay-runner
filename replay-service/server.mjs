@@ -21,7 +21,7 @@ const callbackBaseUrl = (process.env.CALLBACK_BASE_URL || "").replace(/\/$/, "")
 const parserUrl = process.env.PARSER_URL || "http://127.0.0.1:5600/";
 const dataDir = process.env.DATA_DIR || "/data";
 const storePath = join(dataDir, "jobs.json");
-const resultSchemaVersion = "2.1.0";
+const resultSchemaVersion = "2.2.0";
 const jobs = new Map();
 let running = false;
 
