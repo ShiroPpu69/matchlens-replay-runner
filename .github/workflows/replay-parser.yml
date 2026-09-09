@@ -31,6 +31,7 @@ jobs:
       MAX_JOBS_PER_SLOT: 8
       DRAIN_BUDGET_SECONDS: 1800
       REPLAY_IMAGE: ghcr.io/shiroppu69/matchlens-replay-runner:stable
+      REPLAY_CALLBACK_WORKER_VERSION: ${{ vars.REPLAY_CALLBACK_WORKER_VERSION }}
     steps:
       - name: Verify public runner resources
         run: |
@@ -131,6 +132,7 @@ jobs:
             active_job_id=$(echo "$response" | jq -r '.job.jobId // empty')
             replay_url=$(echo "$response" | jq -r '.job.replayUrl // empty')
             callback_worker_version=$(echo "$response" | jq -r '.job.callbackWorkerVersion // empty')
+            if [ -z "$callback_worker_version" ]; then callback_worker_version="$REPLAY_CALLBACK_WORKER_VERSION"; fi
             if [ -z "$active_match_id" ] || [ -z "$active_job_id" ] || [ -z "$replay_url" ]; then
               active_match_id=""
               active_job_id=""
