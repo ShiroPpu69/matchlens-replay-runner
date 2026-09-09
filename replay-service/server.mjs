@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import readline from "node:readline";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 import { extractReplayData, shouldRetainReplayEntry } from "./extract.mjs";
 import { detectReplayCompression, replayCompression } from "./replay-format.mjs";
 import { downloadReplay } from "./download.mjs";
@@ -129,10 +130,12 @@ async function callback(job, result) {
   job.stage = "persist";
   job.lastHeartbeatAt = new Date().toISOString();
   await callbackHeartbeat(job, "persist", job.stageTimings ?? {}).catch(() => undefined);
+  const resultJson = JSON.stringify(result);
+  const resultCompressed = gzipSync(Buffer.from(resultJson, "utf8"), { level: 6 }).toString("base64");
   const response = await fetch(`${callbackBaseUrl}/api/replay-enhancements/${job.matchId}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${callbackToken}`, "Content-Type": "application/json", ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}) },
-    body: JSON.stringify({ jobId: job.id, result }),
+    body: JSON.stringify({ jobId: job.id, resultEncoding: "gzip-base64", resultCompressed }),
     // The callback persists a compressed replay payload into sharded D1. Full
     // decision-state results are larger than legacy payloads, so allow the
     // server-side transaction to finish instead of aborting a healthy parse.
@@ -225,4 +228,3 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, "0.0.0.0", () => { console.log(`replay service listening on ${port}`); void drain(); });
-
