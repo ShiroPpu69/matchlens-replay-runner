@@ -134,7 +134,7 @@ async function callback(job, result) {
   const resultCompressed = gzipSync(Buffer.from(resultJson, "utf8"), { level: 6 }).toString("base64");
   const response = await fetch(`${callbackBaseUrl}/api/replay-enhancements/${job.matchId}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${callbackToken}`, "Content-Type": "application/json", ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}) },
+    headers: callbackHeaders(job),
     body: JSON.stringify({ jobId: job.id, resultEncoding: "gzip-base64", resultCompressed }),
     // The callback persists a compressed replay payload into sharded D1. Full
     // decision-state results are larger than legacy payloads, so allow the
@@ -149,7 +149,7 @@ async function callbackHeartbeat(job, stage, timings = {}) {
   if (!callbackBaseUrl || !callbackToken) return;
   const response = await fetch(`${callbackBaseUrl}/api/replay-enhancements/${job.matchId}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${callbackToken}`, "Content-Type": "application/json", ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}) },
+    headers: callbackHeaders(job),
     body: JSON.stringify({ jobId: job.id, heartbeat: true, stage, parserInstance: hostname(), timings }),
     signal: AbortSignal.timeout(30_000),
   });
@@ -160,11 +160,20 @@ async function callbackFailure(job, error) {
   if (!callbackBaseUrl || !callbackToken) return;
   const response = await fetch(`${callbackBaseUrl}/api/replay-enhancements/${job.matchId}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${callbackToken}`, "Content-Type": "application/json", ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}) },
+    headers: callbackHeaders(job),
     body: JSON.stringify({ jobId: job.id, error: String(error).slice(0, 500) }),
     signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok) throw new Error(`failure callback returned ${response.status}: ${(await response.text()).slice(0, 300)}`);
+}
+
+function callbackHeaders(job) {
+  return {
+    Authorization: `Bearer ${callbackToken}`,
+    "Content-Type": "application/json",
+    ...(sitesBypassToken ? { "OAI-Sites-Authorization": `Bearer ${sitesBypassToken}` } : {}),
+    ...(job.callbackWorkerVersion ? { "Cloudflare-Workers-Version-Overrides": `dota2-match-lens=\"${job.callbackWorkerVersion}\"` } : {}),
+  };
 }
 
 async function drain() {
@@ -217,7 +226,8 @@ const server = createServer(async (req, res) => {
       const existing = [...jobs.values()].find((job) => job.matchId === String(input.matchId) && (["queued", "running"].includes(job.status) || (job.status === "completed" && job.resultSchemaVersion === resultSchemaVersion)));
       if (existing) return json(res, 200, { job: existing });
       const requestedJobId = typeof input.jobId === "string" && /^[a-z0-9-]{16,96}$/i.test(input.jobId) ? input.jobId : randomUUID();
-      const job = { id: requestedJobId, matchId: String(input.matchId), replayUrl: input.replayUrl, status: "queued", stage: "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null, lastHeartbeatAt: null, error: null };
+      const callbackWorkerVersion = typeof input.callbackWorkerVersion === "string" && /^[0-9a-f-]{36}$/i.test(input.callbackWorkerVersion) ? input.callbackWorkerVersion : null;
+      const job = { id: requestedJobId, matchId: String(input.matchId), replayUrl: input.replayUrl, callbackWorkerVersion, status: "queued", stage: "queued", createdAt: new Date().toISOString(), startedAt: null, completedAt: null, lastHeartbeatAt: null, error: null };
       jobs.set(job.id, job);
       await persist();
       void drain();

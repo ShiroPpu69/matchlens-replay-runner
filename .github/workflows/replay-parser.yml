@@ -130,6 +130,7 @@ jobs:
             active_match_id=$(echo "$response" | jq -r '.job.matchId // empty')
             active_job_id=$(echo "$response" | jq -r '.job.jobId // empty')
             replay_url=$(echo "$response" | jq -r '.job.replayUrl // empty')
+            callback_worker_version=$(echo "$response" | jq -r '.job.callbackWorkerVersion // empty')
             if [ -z "$active_match_id" ] || [ -z "$active_job_id" ] || [ -z "$replay_url" ]; then
               active_match_id=""
               active_job_id=""
@@ -207,7 +208,7 @@ jobs:
           while [ "$processed" -lt "$MAX_JOBS_PER_SLOT" ] && [ "$SECONDS" -lt $((drain_deadline - 660)) ]; do
             runner_lifecycle heartbeat
             echo "Processing replay ${active_match_id} (${processed}/${MAX_JOBS_PER_SLOT} already completed in this slot)."
-            submit=$(jq -n --arg jobId "$active_job_id" --arg matchId "$active_match_id" --arg replayUrl "$replay_url" '{jobId:$jobId,matchId:$matchId,replayUrl:$replayUrl}')
+            submit=$(jq -n --arg jobId "$active_job_id" --arg matchId "$active_match_id" --arg replayUrl "$replay_url" --arg callbackWorkerVersion "$callback_worker_version" '{jobId:$jobId,matchId:$matchId,replayUrl:$replayUrl,callbackWorkerVersion:(if $callbackWorkerVersion == "" then null else $callbackWorkerVersion end)}')
             if ! job=$(curl --fail --silent --show-error --request POST \
               --header 'Authorization: Bearer local-runner' --header 'Content-Type: application/json' \
               --data "$submit" http://127.0.0.1:8080/v1/jobs); then
