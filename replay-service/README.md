@@ -11,12 +11,18 @@ When the replay contains the required entities, the worker returns verified:
 - hero kills and death timestamps;
 - assist counter changes, with explicit ambiguity for same-second deaths;
 - hero position samples;
+- five-second life-state, health, mana and respawn-transition coverage;
+- five-second inventory contents, slots and charge snapshots;
+- timestamped hero ability casts and active item uses with resolved actors and targets;
+- direct hero damage to towers, barracks and the Ancient;
 - purchases and ability upgrades;
 - economy and experience snapshots;
 - damage and healing events;
 - wards, runes, buybacks, and map objectives.
 
-The service does not invent events missing from the replay or parser.
+The service does not invent events missing from the replay or parser. Exact
+cooldowns, lane-wave state, tower health, camera, voice communication and the
+player's complete fog-of-war knowledge remain explicitly unknown.
 
 ## Required environment
 
@@ -69,3 +75,4 @@ death. If multiple heroes die in the same replay interval and assignment is not
 unique, the result is marked ambiguous. Death coordinates come from the
 victim's closest verified position sample; derived map labels are calculated by
 the web application, not by AI.
+

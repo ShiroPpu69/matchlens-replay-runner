@@ -1,7 +1,7 @@
 FROM maven:3.9.11-eclipse-temurin-21 AS parser-build
 RUN git clone https://github.com/odota/parser.git /src/parser && cd /src/parser && git checkout a03b9e5f228cecb3f2e3ddfd378683bbb1d467fa
 COPY replay-service/odota-decision-state.patch /src/odota-decision-state.patch
-RUN cd /src/parser && git apply /src/odota-decision-state.patch
+RUN cd /src/parser && git apply --recount /src/odota-decision-state.patch
 RUN cd /src/parser && mvn -q -DskipTests package
 COPY replay-service/ReplayBzip2.java /src/ReplayBzip2.java
 RUN mkdir -p /src/replay-tools && \
@@ -22,3 +22,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends zstd && \
 ENV PORT=8080 DATA_DIR=/data PARSER_URL=http://127.0.0.1:5600/
 EXPOSE 8080
 CMD ["/app/start.sh"]
+

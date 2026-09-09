@@ -21,7 +21,7 @@ const callbackBaseUrl = (process.env.CALLBACK_BASE_URL || "").replace(/\/$/, "")
 const parserUrl = process.env.PARSER_URL || "http://127.0.0.1:5600/";
 const dataDir = process.env.DATA_DIR || "/data";
 const storePath = join(dataDir, "jobs.json");
-const resultSchemaVersion = "2.2.0";
+const resultSchemaVersion = "2.4.0";
 const jobs = new Map();
 let running = false;
 
@@ -56,6 +56,18 @@ async function parseReplay(job) {
   const replay = join(dir, "match.dem");
   const timings = {};
   let stageStarted = Date.now();
+  let heartbeatTimer = null;
+  let heartbeatInFlight = false;
+  const armHeartbeat = () => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = true;
+      const liveTimings = { ...timings, stageElapsedMs: Date.now() - stageStarted };
+      job.lastHeartbeatAt = new Date().toISOString();
+      callbackHeartbeat(job, job.stage, liveTimings).catch(() => undefined).finally(() => { heartbeatInFlight = false; });
+    }, 20_000);
+  };
   const setStage = async (stage) => {
     if (job.stage) timings[`${job.stage}Ms`] = Date.now() - stageStarted;
     stageStarted = Date.now();
@@ -64,6 +76,7 @@ async function parseReplay(job) {
     job.stageTimings = { ...timings };
     await persist();
     await callbackHeartbeat(job, stage, timings).catch(() => undefined);
+    armHeartbeat();
   };
   try {
     await setStage("download");
@@ -106,6 +119,7 @@ async function parseReplay(job) {
     console.log("[replay] parser completed", { matchId: job.matchId, entries: entries.length, resultBytes: Buffer.byteLength(JSON.stringify(result)) });
     return result;
   } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -211,3 +225,4 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, "0.0.0.0", () => { console.log(`replay service listening on ${port}`); void drain(); });
+

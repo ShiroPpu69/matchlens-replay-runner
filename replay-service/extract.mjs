@@ -6,8 +6,12 @@ const retainedCombatLogTypes = new Set([
   "DOTA_COMBATLOG_DEATH", "DOTA_ABILITY_LEVEL", "DOTA_COMBATLOG_PURCHASE",
   "DOTA_COMBATLOG_DAMAGE", "DOTA_COMBATLOG_HEAL", "DOTA_COMBATLOG_BUYBACK",
   "DOTA_COMBATLOG_TEAM_BUILDING_KILL", "DOTA_COMBATLOG_ABILITY", "DOTA_COMBATLOG_ITEM",
+  "DOTA_COOLDOWN_START",
 ]);
 
+// Keep parser ingestion and extraction in one contract. In schema 2.1 the
+// extractor understood action events, but the streaming filter silently
+// discarded them before extraction while still reporting action coverage.
 export function shouldRetainReplayEntry(entry) {
   const type = String(entry?.type ?? "");
   return type === "interval" || type === "player_slot" || retainedCombatLogTypes.has(type)
@@ -95,6 +99,10 @@ export function extractReplayData(entries) {
   const runeEvents = [];
   const abilityCasts = [];
   const itemUses = [];
+  const inventorySnapshots = [];
+  const abilityStateSnapshots = [];
+  const buildingDamageEvents = [];
+  const cooldownEvents = [];
   const lifeStateTransitions = [];
   const seenActions = new Set();
   const lastLifeState = new Map();
@@ -133,12 +141,57 @@ export function extractReplayData(entries) {
         if (lifeState !== null) positionSamplesWithLifeState += 1;
         positions.push({ gameTime, playerSlot, x, y, lifeState, level: finite(entry.level), health, maxHealth, mana, maxMana });
       }
+      if (gameTime >= 0 && Array.isArray(entry.decision_inventory_items)) {
+        const slots = Array.isArray(entry.decision_inventory_slots) ? entry.decision_inventory_slots : [];
+        const charges = Array.isArray(entry.decision_inventory_charges) ? entry.decision_inventory_charges : [];
+        const secondaryCharges = Array.isArray(entry.decision_inventory_secondary_charges) ? entry.decision_inventory_secondary_charges : [];
+        const cooldowns = Array.isArray(entry.decision_inventory_cooldown_remaining) ? entry.decision_inventory_cooldown_remaining : [];
+        const items = entry.decision_inventory_items.flatMap((rawItemKey, index) => {
+          const itemKey = normalizeActionKey(rawItemKey);
+          const itemSlot = finite(slots[index]);
+          if (!itemKey || itemSlot === null || itemSlot < 0 || itemSlot > 16) return [];
+          return [{ itemKey, itemSlot, charges: finite(charges[index]), secondaryCharges: finite(secondaryCharges[index]), cooldownRemaining: finite(cooldowns[index]) }];
+        });
+        inventorySnapshots.push({ gameTime, playerSlot, items, source: "replay_entity_inventory" });
+      }
+      if (gameTime >= 0 && Array.isArray(entry.decision_ability_items)) {
+        const levels = Array.isArray(entry.decision_ability_levels) ? entry.decision_ability_levels : [];
+        const cooldowns = Array.isArray(entry.decision_ability_cooldown_remaining) ? entry.decision_ability_cooldown_remaining : [];
+        const abilities = entry.decision_ability_items.flatMap((rawAbilityKey, index) => {
+          const abilityKey = normalizeActionKey(rawAbilityKey);
+          const level = finite(levels[index]);
+          if (!abilityKey || level === null || level < 0) return [];
+          return [{ abilityKey, level, cooldownRemaining: finite(cooldowns[index]) }];
+        });
+        abilityStateSnapshots.push({ gameTime, playerSlot, abilities, source: "replay_entity_ability" });
+      }
       const minuteBucket = Math.floor(Math.max(0, gameTime) / 60);
       if (gameTime >= 0 && lastMinuteBucket.get(entry.slot) !== minuteBucket) {
         lastMinuteBucket.set(entry.slot, minuteBucket);
         minuteSamples.push({ gameTime, playerSlot, gold: finite(entry.gold), netWorth: finite(entry.networth), xp: finite(entry.xp), level: finite(entry.level), lastHits: finite(entry.lh), denies: finite(entry.denies), kills: finite(entry.kills), deaths: finite(entry.deaths), assists: finite(entry.assists) });
       }
       continue;
+    }
+    if (entry.type === "DOTA_COOLDOWN_START") {
+      const gameTime = finite(entry.time);
+      const playerSlot = Number.isInteger(entry.slot) ? indexes.slotToPlayerSlot.get(entry.slot) ?? null : null;
+      const rawResourceKey = typeof entry.valuename === "string" ? entry.valuename : null;
+      const resourceKey = normalizeActionKey(rawResourceKey);
+      const initialRemaining = finite(entry.floatValue);
+      if (gameTime !== null && gameTime >= 0 && playerSlot !== null && resourceKey && initialRemaining !== null && initialRemaining > 0) cooldownEvents.push({
+        gameTime, playerSlot, resourceKey, resourceType: entry.booleanValue === true || String(rawResourceKey).startsWith("item_") ? "item" : "ability",
+        initialRemaining, cooldownEndGameTime: gameTime + initialRemaining, source: "replay_entity_cooldown",
+      });
+    } else if (entry.type === "DOTA_COMBATLOG_DAMAGE" && entry.attackerhero && !entry.attackerillusion
+      && typeof entry.targetname === "string" && /^npc_dota_(?:goodguys|badguys)_(?:tower|(?:melee|ranged)_rax|fort)/u.test(entry.targetname)) {
+      const sourceHeroKey = [entry.attackername, entry.sourcename]
+        .find((value) => typeof value === "string" && value.startsWith("npc_dota_hero_")) ?? null;
+      const playerSlot = sourceHeroKey ? indexes.playerSlotForHero(sourceHeroKey) : null;
+      const damage = finite(entry.value);
+      if (playerSlot !== null && damage !== null && damage > 0) buildingDamageEvents.push({
+        gameTime: finite(entry.time), playerSlot, heroKey: sourceHeroKey,
+        target: entry.targetname, damage, source: "replay_combat_log",
+      });
     }
     if (entry.type === "DOTA_ABILITY_LEVEL" && finite(entry.abilitylevel) !== null && Number(entry.abilitylevel) > 0) {
       abilityUpgrades.push({ ...compactEvent(entry, indexes), abilityKey: String(entry.valuename ?? "unknown"), abilityLevel: Number(entry.abilitylevel), source: "replay_combat_log" });
@@ -149,6 +202,8 @@ export function extractReplayData(entries) {
     } else if (entry.type === "DOTA_COMBATLOG_BUYBACK") {
       buybacks.push({ gameTime: finite(entry.time), playerSlot: finite(entry.value), source: "replay_combat_log" });
     } else if (entry.type === "DOTA_COMBATLOG_ABILITY" || entry.type === "DOTA_COMBATLOG_ITEM") {
+      // Never fall back to targetname for the acting hero: targeted spell
+      // records can otherwise attribute the victim's slot as the caster.
       const sourceHeroKey = [entry.attackername, entry.sourcename]
         .find((value) => typeof value === "string" && value.startsWith("npc_dota_hero_")) ?? null;
       if (sourceHeroKey) actionEntriesSeen += 1;
@@ -173,6 +228,35 @@ export function extractReplayData(entries) {
     }
   }
 
+  const cooldownTimelines = new Map();
+  for (const event of cooldownEvents) {
+    const key = `${event.playerSlot}|${event.resourceType}|${event.resourceKey}`;
+    const timeline = cooldownTimelines.get(key) ?? [];
+    timeline.push(event);
+    cooldownTimelines.set(key, timeline);
+  }
+  for (const timeline of cooldownTimelines.values()) timeline.sort((a, b) => a.gameTime - b.gameTime);
+  const cooldownFor = (playerSlot, resourceType, resourceKey, gameTime) => {
+    const timeline = cooldownTimelines.get(`${playerSlot}|${resourceType}|${resourceKey}`) ?? [];
+    let low = 0; let high = timeline.length - 1; let active = null;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (timeline[middle].gameTime <= gameTime) { active = timeline[middle]; low = middle + 1; } else high = middle - 1;
+    }
+    if (active && active.cooldownEndGameTime <= gameTime) active = null;
+    return active ? Number(Math.max(0, active.cooldownEndGameTime - gameTime).toFixed(3)) : 0;
+  };
+  const observedInventoryCooldownStates = inventorySnapshots.reduce((sum, snapshot) => sum + snapshot.items.filter((item) => item.cooldownRemaining !== null).length, 0);
+  const observedAbilityCooldownStates = abilityStateSnapshots.reduce((sum, snapshot) => sum + snapshot.abilities.filter((ability) => ability.cooldownRemaining !== null).length, 0);
+  for (const snapshot of inventorySnapshots) for (const item of snapshot.items) {
+    if (item.cooldownRemaining === null) item.cooldownRemaining = cooldownFor(snapshot.playerSlot, "item", item.itemKey, snapshot.gameTime);
+  }
+  for (const snapshot of abilityStateSnapshots) for (const ability of snapshot.abilities) {
+    if (ability.cooldownRemaining === null) ability.cooldownRemaining = cooldownFor(snapshot.playerSlot, "ability", ability.abilityKey, snapshot.gameTime);
+  }
+  const observedInventoryItems = inventorySnapshots.reduce((sum, snapshot) => sum + snapshot.items.length, 0);
+  const observedAbilities = abilityStateSnapshots.reduce((sum, snapshot) => sum + snapshot.abilities.length, 0);
+
   return {
     kills: enhanceKills(entries),
     abilityUpgrades,
@@ -187,6 +271,10 @@ export function extractReplayData(entries) {
     healingBySourceTarget: aggregateCombat(entries, "DOTA_COMBATLOG_HEAL", indexes),
     abilityCasts,
     itemUses,
+    inventorySnapshots,
+    abilityStateSnapshots,
+    cooldownEvents,
+    buildingDamageEvents,
     lifeStateTransitions,
     coverage: {
       positionIntervalSeconds: 5,
@@ -194,7 +282,7 @@ export function extractReplayData(entries) {
       lowLevelActionsOmitted: true,
       actionEventsCaptured: true,
       actionEventFilterVersion: 4,
-      decisionStateFields: ["health", "maxHealth", "mana", "maxMana", "lifeState", "position"],
+      decisionStateFields: ["health", "maxHealth", "mana", "maxMana", "lifeState", "position", "inventory", "itemSlot", "charges", "itemCooldownRemaining", "abilityLevel", "abilityCooldownRemaining", "buildingDamage"],
       positionSamples: positions.length,
       positionSamplesWithHealth,
       positionSamplesWithMana,
@@ -207,8 +295,19 @@ export function extractReplayData(entries) {
       actionActorResolutionRate: ratio(actionEntriesWithResolvedActor, actionEntriesSeen),
       observedAbilityCasts: abilityCasts.length,
       observedItemUses: itemUses.length,
+      observedInventorySnapshots: inventorySnapshots.length,
+      observedAbilityStateSnapshots: abilityStateSnapshots.length,
+      observedBuildingDamageEvents: buildingDamageEvents.length,
+      observedCooldownStarts: cooldownEvents.length,
+      itemCooldownStateCoverage: ratio(observedInventoryCooldownStates, observedInventoryItems),
+      abilityCooldownStateCoverage: ratio(observedAbilityCooldownStates, observedAbilities),
+      inventorySnapshotIntervalSeconds: 5,
+      abilityStateSnapshotIntervalSeconds: 5,
+      cooldownStateCaptured: true,
+      buildingDamageCaptured: true,
       observedLifeStateTransitions: lifeStateTransitions.length,
       source: "Valve replay parsed by odota/parser",
     },
   };
 }
+

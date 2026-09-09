@@ -1,7 +1,7 @@
 diff --git a/src/main/java/opendota/Entry.java b/src/main/java/opendota/Entry.java
 --- a/src/main/java/opendota/Entry.java
 +++ b/src/main/java/opendota/Entry.java
-@@ -47,6 +47,10 @@ public class Entry implements Cloneable {
+@@ -47,6 +47,18 @@ public class Entry implements Cloneable {
      public Integer charges;
      public Integer secondary_charges;
      public Integer life_state;
@@ -9,13 +9,105 @@ diff --git a/src/main/java/opendota/Entry.java b/src/main/java/opendota/Entry.ja
 +    public Integer max_health;
 +    public Float mana;
 +    public Float max_mana;
++    public List<String> decision_inventory_items;
++    public List<Integer> decision_inventory_slots;
++    public List<Integer> decision_inventory_charges;
++    public List<Integer> decision_inventory_secondary_charges;
++    public List<Float> decision_inventory_cooldown_remaining;
++    public List<String> decision_ability_items;
++    public List<Integer> decision_ability_levels;
++    public List<Float> decision_ability_cooldown_remaining;
      public Integer level;
      public Integer kills;
      public Integer deaths;
 diff --git a/src/main/java/opendota/Parse.java b/src/main/java/opendota/Parse.java
 --- a/src/main/java/opendota/Parse.java
 +++ b/src/main/java/opendota/Parse.java
-@@ -725,5 +725,9 @@ public class Parse {
+@@ -11,4 +11,5 @@ import skadistats.clarity.processor.entities.OnEntityEntered;
+ import skadistats.clarity.processor.entities.OnEntityEntered;
++import skadistats.clarity.processor.entities.OnEntityUpdated;
+ import skadistats.clarity.processor.entities.UsesEntities;
+ import skadistats.clarity.processor.gameevents.OnCombatLogEntry;
+ import skadistats.clarity.processor.reader.OnMessage;
+@@ -52,6 +53,7 @@ public class Parse {
+     private class Ability {
+         String id;
+         Integer abilityLevel;
++        Float cooldownRemaining;
+ 
+     }
+ 
+@@ -79,5 +81,23 @@ public class Parse {
+     HashMap<String, Integer> name_to_slot = new HashMap<String, Integer>();
+     HashMap<String, Integer> abilities_tracking = new HashMap<String, Integer>();
++    HashMap<Integer, Float> cooldown_tracking = new HashMap<Integer, Float>();
++    IdentityHashMap<DTClass, FieldPath> cooldown_paths = new IdentityHashMap<DTClass, FieldPath>();
++    HashMap<Integer, Integer> cooldown_owner_slots = new HashMap<Integer, Integer>();
++    HashMap<Integer, String> cooldown_resource_names = new HashMap<Integer, String>();
++    HashMap<Integer, String> cooldown_owner_heroes = new HashMap<Integer, String>();
++    Integer current_decision_hero_slot = null;
++    private void trackCooldownResource(Entity resource, Entity hero, String resourceName) {
++        int resourceIndex = resource.getIndex();
++        String ownerUnit = hero.getDtClass().getDtName();
++        String heroName = ownerUnit.startsWith("CDOTA_Unit_Hero_")
++                ? "npc_dota_hero_" + ownerUnit.substring("CDOTA_Unit_Hero_".length()).toLowerCase()
++                : null;
++        if (current_decision_hero_slot == null) return;
++        cooldown_owner_slots.put(resourceIndex, current_decision_hero_slot);
++        cooldown_resource_names.put(resourceIndex, resourceName);
++        cooldown_owner_heroes.put(resourceIndex, heroName);
++    }
++
+     List<Ability> abilities;
+     HashMap<Integer, Integer> slot_to_playerslot = new HashMap<Integer, Integer>();
+     HashMap<Long, Integer> steamid_to_playerslot = new HashMap<Long, Integer>();
+@@ -428,5 +448,45 @@ public class Parse {
+     }
+ 
++    @OnEntityUpdated
++    public void onCooldownUpdated(Context ctx, Entity e, FieldPath[] fieldPaths, int num) {
++        if (gameStartTime == 0 || e == null) return;
++        DTClass dt = e.getDtClass();
++        FieldPath cooldownPath = cooldown_paths.get(dt);
++        if (!cooldown_paths.containsKey(dt)) {
++            cooldownPath = dt.getFieldPathForName("m_fCooldown");
++            cooldown_paths.put(dt, cooldownPath);
++        }
++        if (cooldownPath == null) return;
++        boolean changed = false;
++        for (int i = 0; i < num; i++) {
++            if (cooldownPath.equals(fieldPaths[i])) {
++                changed = true;
++                break;
++            }
++        }
++        if (!changed) return;
++        Number rawEnd = e.getPropertyForFieldPath(cooldownPath);
++        float newEnd = rawEnd == null ? 0f : rawEnd.floatValue();
++        float oldEnd = cooldown_tracking.getOrDefault(e.getIndex(), 0f);
++        cooldown_tracking.put(e.getIndex(), newEnd);
++        if (newEnd <= oldEnd || newEnd <= 0f) return;
++        // Current Source 2 replays expose the remaining cooldown duration
++        // here (not a stable absolute match clock). Treating it as an end
++        // timestamp makes every in-game cooldown negative.
++        float remaining = newEnd;
++        Integer ownerSlot = cooldown_owner_slots.get(e.getIndex());
++        String actionName = cooldown_resource_names.get(e.getIndex());
++        if (remaining <= 0f || ownerSlot == null || actionName == null) return;
++        Entry cooldownEntry = new Entry(time);
++        cooldownEntry.type = "DOTA_COOLDOWN_START";
++        cooldownEntry.slot = ownerSlot;
++        cooldownEntry.targetname = cooldown_owner_heroes.get(e.getIndex());
++        cooldownEntry.valuename = actionName;
++        cooldownEntry.floatValue = remaining;
++        cooldownEntry.booleanValue = actionName.startsWith("item_");
++        output(cooldownEntry);
++    }
++
+     @OnMessage(CNETMsg_Tick.class)
+     public void onMessage(CNETMsg_Tick message) {
+         serverTick = message.getTick();
+@@ -725,5 +785,9 @@ public class Parse {
                          entry.variant = variant;
                          entry.facet_hero_id = facet_hero_id;
                          entry.life_state = getEntityProperty(e, "m_lifeState", null);
@@ -25,3 +117,75 @@ diff --git a/src/main/java/opendota/Parse.java b/src/main/java/opendota/Parse.ja
 +                        entry.max_mana = getEntityProperty(e, "m_flMaxMana", null);
                          // check if hero has been assigned to entity
                          if (hero > 0) {
+@@ -744,6 +808,17 @@ public class Parse {
+                             name_to_slot.put(combatLogName2, entry.slot);
+ 
++                            current_decision_hero_slot = entry.slot;
+                             abilities = getHeroAbilities(ctx, e);
++                            if (time >= gameStartTime && (time - gameStartTime) % 5 == 0) {
++                                entry.decision_ability_items = new ArrayList<>();
++                                entry.decision_ability_levels = new ArrayList<>();
++                                entry.decision_ability_cooldown_remaining = new ArrayList<>();
++                                for (Ability ability : abilities) {
++                                    entry.decision_ability_items.add(ability.id);
++                                    entry.decision_ability_levels.add(ability.abilityLevel);
++                                    entry.decision_ability_cooldown_remaining.add(ability.cooldownRemaining);
++                                }
++                            }
+                             for (Ability ability : abilities) {
+                                 // Only push ability updates when the level changes
+                                 if (abilities_tracking.get(combatLogName + ability.id) != ability.abilityLevel
+@@ -760,6 +835,23 @@ public class Parse {
+                             }
+ 
+                             entry.hero_inventory = getHeroInventory(ctx, e);
++                            // Preserve decision state at the same five-second cadence
++                            // as position samples. hero_inventory is transient and
++                            // otherwise disappears before extraction.
++                            if (time >= gameStartTime && (time - gameStartTime) % 5 == 0) {
++                                entry.decision_inventory_items = new ArrayList<>();
++                                entry.decision_inventory_slots = new ArrayList<>();
++                                entry.decision_inventory_charges = new ArrayList<>();
++                                entry.decision_inventory_secondary_charges = new ArrayList<>();
++                                entry.decision_inventory_cooldown_remaining = new ArrayList<>();
++                                for (Item item : entry.hero_inventory) {
++                                    entry.decision_inventory_items.add(item.id);
++                                    entry.decision_inventory_slots.add(item.slot);
++                                    entry.decision_inventory_charges.add(item.num_charges);
++                                    entry.decision_inventory_secondary_charges.add(item.num_secondary_charges);
++                                    entry.decision_inventory_cooldown_remaining.add(item.cooldown_remaining);
++                                }
++                            }
+                             if (time - gameStartTime - 1 == 0) {
+                                 for (Item item : entry.hero_inventory) {
+                                     Entry startingItems = new Entry(time);
+@@ -875,6 +967,8 @@ public class Parse {
+             throw new UnknownItemFoundException("Can't get item name from EntityName string table");
+         }
+ 
++        trackCooldownResource(eItem, eHero, itemName);
+         Item item = new Item();
+         item.id = itemName;
++        item.cooldown_remaining = getEntityProperty(eItem, "m_fCooldown", null);
+         item.slot = idx;
+@@ -927,6 +1021,8 @@ public class Parse {
+             throw new UnknownAbilityFoundException("Can't get ability name from EntityName string table");
+         }
+ 
++        trackCooldownResource(eAbility, eHero, abilityName);
+         Ability ability = new Ability();
+         ability.id = abilityName;
+         ability.abilityLevel = eAbility.getProperty("m_iLevel");
++        ability.cooldownRemaining = getEntityProperty(eAbility, "m_fCooldown", null);
+
+diff --git a/src/main/java/opendota/Item.java b/src/main/java/opendota/Item.java
+--- a/src/main/java/opendota/Item.java
++++ b/src/main/java/opendota/Item.java
+@@ -10,4 +10,5 @@ public class Item {
+     // and num_secondary_charges for sentry wards count
+     // and is considered not stackable
+     Integer num_secondary_charges;
+-}
+\ No newline at end of file
++    Float cooldown_remaining;
++}
